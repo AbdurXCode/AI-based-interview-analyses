@@ -55,6 +55,18 @@ export function parseApiError(payload: unknown): string {
   return "";
 }
 
+export class ApiError extends Error {
+  status: number;
+  payload: unknown;
+
+  constructor(message: string, status: number, payload: unknown) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.payload = payload;
+  }
+}
+
 async function parseJsonSafe(res: Response): Promise<unknown> {
   const text = await res.text();
   if (!text) return {};
@@ -63,6 +75,10 @@ async function parseJsonSafe(res: Response): Promise<unknown> {
   } catch {
     return {};
   }
+}
+
+function throwApiError(res: Response, payload: unknown): never {
+  throw new ApiError(parseApiError(payload) || res.statusText, res.status, payload);
 }
 
 function bearerAuth(): Record<string, string> {
@@ -83,7 +99,7 @@ export async function apiPost<T>(path: string, body: unknown): Promise<T> {
   });
   const data = await parseJsonSafe(res);
   if (!res.ok) {
-    throw new Error(parseApiError(data) || res.statusText);
+    throwApiError(res, data);
   }
   return data as T;
 }
@@ -115,7 +131,7 @@ export async function apiPostDirect<T>(path: string, body: unknown): Promise<T> 
   });
   const data = await parseJsonSafe(res);
   if (!res.ok) {
-    throw new Error(parseApiError(data) || res.statusText);
+    throwApiError(res, data);
   }
   return data as T;
 }
@@ -132,7 +148,7 @@ export async function apiPatch<T>(path: string, body: unknown): Promise<T> {
   });
   const data = await parseJsonSafe(res);
   if (!res.ok) {
-    throw new Error(parseApiError(data) || res.statusText);
+    throwApiError(res, data);
   }
   return data as T;
 }
@@ -146,7 +162,7 @@ export async function apiGetJson<T>(path: string): Promise<T> {
   });
   const data = await parseJsonSafe(res);
   if (!res.ok) {
-    throw new Error(parseApiError(data) || res.statusText);
+    throwApiError(res, data);
   }
   return data as T;
 }
@@ -166,7 +182,7 @@ export async function apiUploadFile(path: string, file: File, fieldName = "file"
   });
   const data = await parseJsonSafe(res);
   if (!res.ok) {
-    throw new Error(parseApiError(data) || res.statusText);
+    throwApiError(res, data);
   }
   return data;
 }

@@ -1,0 +1,2 @@
+Extract job-description signals as JSON ONLY:
+{"must_have_skills": string[], "nice_to_have_skills": string[], "keywords": string[], "title_guess": string|null}

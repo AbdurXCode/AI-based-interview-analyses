@@ -312,6 +312,24 @@ def rewrite_bullet(
                 if isinstance(b, dict) and str(b.get("id")) == str(body.bullet_id):
                     bullet_text_before = str(b.get("text", ""))
 
+    fb = dict(rp.feedback or {})
+    da = fb.get("domain_alignment") if isinstance(fb.get("domain_alignment"), dict) else {}
+    if not da or "domain_mismatch" not in da:
+        jd_row = db.get(JobDescription, rp.jd_id) if rp.jd_id else None
+        if jd_row and jd_row.user_id == user.id:
+            jd_struct = jd_row.extracted_keywords if isinstance(jd_row.extracted_keywords, dict) else {}
+            jd_struct = dict(jd_struct)
+            jd_struct.setdefault("keywords", jd_struct.get("keywords") or [])
+            da = resume_pipeline.analyze_domain_alignment(pdata, jd_row.raw_text or "", jd_struct)
+    if da.get("domain_mismatch"):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail=(
+                "Rewriting bullets is disabled when the résumé targets a different career domain than the "
+                "attached job. Run analyze or adjust your JD, then align your experience before rewriting."
+            ),
+        )
+
     try:
         out = resume_pipeline.rewrite_bullet(bullet_text_before or " ", body.extra_instruction)
     except RuntimeError:

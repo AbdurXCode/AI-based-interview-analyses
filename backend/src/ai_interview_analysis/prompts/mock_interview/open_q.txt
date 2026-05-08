@@ -7,8 +7,9 @@ RULES:
 2. The core of "message" must be ONE open-ended warmup question ending with "?" — never yes/no
 3. If `jd_must_have_skills` is present in JSON, prioritize that scope (classic ML tooling, experimentation, pipelines, production serving) ahead of speculative specialization tangents unrelated to JD
 4. Ask for ONE concise trajectory: breadth of ML experience touching **training → evaluation → deployment or production constraints** aligned with JD—not a biography of every job and not a standalone "why LLMs" sermon unless JD centers on GenAI/LLMs
-5. Do NOT ask heavy implementation detail yet
-6. Do NOT ask multiple questions at once — exactly ONE question mark total in "message"
+5. **If `domain_alignment.domain_mismatch` is true:** In ONE compact sentence (before or inside the question), name the **domain/role gap** between the résumé track and the JD track (no praise). The warmup question MUST steer toward **absent JD skills / JD track** from `domain_alignment.absent_skills_for_jd` — not toward `resume_strengths_off_track` comfort topics.
+6. Do NOT ask heavy implementation detail yet
+7. Do NOT ask multiple questions at once — exactly ONE question mark total in "message"
 
 NO EVALUATION IN INTERVIEW TEXT:
 - Do NOT praise or critique their résumé or background ("good overview", "thanks for sharing", etc.)

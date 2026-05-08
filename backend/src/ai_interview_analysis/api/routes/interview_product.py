@@ -253,14 +253,19 @@ def end_mock_session(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
-    """Force-end a session and generate the final performance report."""
+    """Request-end a session (fast) and mark the report as pending.
+
+    The client should then call `/interviews/sessions/{session_id}/report` to finalize
+    the performance report. This avoids long synchronous requests that can time out
+    behind proxies.
+    """
     try:
-        result = mock_orchestration.end_session(db, session_id, user.id)
+        result = mock_orchestration.request_end_session(db, session_id, user.id)
     except Exception as exc:
         logger.exception("end_mock_session failed session_id=%s", session_id)
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Could not finalize this interview session right now. Please try again in a few seconds.",
+            detail="Could not end this interview session right now. Please try again in a few seconds.",
         ) from exc
     if result is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "session not found")

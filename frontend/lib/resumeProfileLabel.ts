@@ -3,6 +3,7 @@
 export type ResumeProfileListItem = {
   profile_id: string;
   version: number;
+  jd_id?: string | null;
   profile_data: Record<string, unknown>;
   created_at?: string;
   source_filename?: string | null;
