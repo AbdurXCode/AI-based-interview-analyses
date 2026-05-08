@@ -26,6 +26,7 @@ SYSTEM_NEXT_TOPIC = _PROMPTS["SYSTEM_NEXT_TOPIC"]
 SYSTEM_CLOSE = _PROMPTS["SYSTEM_CLOSE"]
 SYSTEM_REPORT = _PROMPTS["SYSTEM_REPORT"]
 SYSTEM_POST_LIVE_METRICS = _PROMPTS["SYSTEM_POST_LIVE_METRICS"]
+SYSTEM_CONFIRM_CONTINUE = _PROMPTS["SYSTEM_CONFIRM_CONTINUE"]
 
 # ════════════════════════════════════════════════════════
 # GUARDRAIL CONSTANTS
@@ -34,7 +35,7 @@ SYSTEM_POST_LIVE_METRICS = _PROMPTS["SYSTEM_POST_LIVE_METRICS"]
 MAX_FOLLOWUPS_PER_TOPIC = 2
 MIN_ANSWER_WORDS = 10
 # Phase quotas for the interview roadmap (main questions == topic count per phase).
-# Keep SYSTEM_OUTLINE (outline.txt) and the UI roadmap in sync with these numbers.
+# Keep SYSTEM_OUTLINE (prompts/mock_interview/outline.txt) and the UI roadmap in sync.
 PHASE_MAIN_QUOTAS: dict[str, int] = {
     "warmup": 1,
     "jd_core": 3,
@@ -79,6 +80,30 @@ def _project_topics_overlap_similar(a: dict[str, Any], b: dict[str, Any]) -> boo
     inter = len(sa & sb)
     denom = min(len(sa), len(sb))
     return inter >= 2 and (inter / max(denom, 1)) >= 0.4
+
+
+def classify_continue_intent(user_text: str) -> str | None:
+    """Semantic YES/NO/UNCLEAR for mismatch confirmation gate."""
+    s = (user_text or "").strip()
+    if not s:
+        return None
+    try:
+        blob = gemini_client.generate_json(
+            SYSTEM_CONFIRM_CONTINUE,
+            s[:2000],
+            temperature=0.0,
+            max_output_tokens=64,
+        )
+        if not isinstance(blob, dict):
+            return None
+        d = str(blob.get("decision") or "").strip().lower()
+        if d in ("yes", "no"):
+            return d
+        if d == "unclear":
+            return None
+        return None
+    except Exception:
+        return None
 
 
 def _pick_project_topics_diverse(pool: list[dict[str, Any]], quota: int) -> list[dict[str, Any]]:
@@ -342,6 +367,7 @@ def first_assistant_message(
     profile: dict[str, Any],
     interview_type: str,
     level: str,
+    domain_alignment: dict[str, Any] | None = None,
 ) -> str:
     """Generate warm opening + first warmup question."""
     blob = gemini_client.generate_json(
@@ -352,6 +378,7 @@ def first_assistant_message(
             "jd_must_have_skills": outline.get("jd_must_have_skills"),
             "type": interview_type,
             "level": level,
+            "domain_alignment": domain_alignment or {},
         })[:40000],
         temperature=0.45,
     )
@@ -516,6 +543,7 @@ def evaluate_answer(
     topic_phase: str | None = None,
     recent_transcript: str | None = None,
     jd_snippet: str | None = None,
+    domain_alignment: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Evaluate candidate answer quality.
@@ -553,6 +581,29 @@ def evaluate_answer(
         rtx = (recent_transcript or "").strip()
         if rtx:
             user_payload += f"recent_conversation_transcript=\n{rtx[:32000]}\n"
+
+        da = domain_alignment if isinstance(domain_alignment, dict) else {}
+        if da.get("domain_mismatch"):
+            rsum = str(da.get("resume_career_track") or "").strip()
+            jsum = str(da.get("jd_career_track") or "").strip()
+            absent = da.get("absent_skills_for_jd") if isinstance(da.get("absent_skills_for_jd"), list) else []
+            off = da.get("resume_strengths_off_track") if isinstance(da.get("resume_strengths_off_track"), list) else []
+            absent_s = ", ".join(str(x).strip() for x in absent[:8] if str(x).strip())
+            off_s = ", ".join(str(x).strip() for x in off[:6] if str(x).strip())
+            user_payload += "domain_alignment_context=\n"
+            user_payload += (
+                f"CAREER_DOMAIN_MISMATCH: The candidate's résumé emphasizes ({rsum or 'see profile'}) "
+                f"while this role centers on ({jsum or 'see JD'}). "
+                "Penalize answers that only showcase off-track strengths when the question probes JD craft. "
+                "In coach_feedback, call out **wrong-track / domain misalignment** when relevant (not only 'vague').\n"
+            )
+            if absent_s:
+                user_payload += f"Priority gaps to probe or credit if demonstrated: {absent_s}.\n"
+            if off_s:
+                user_payload += (
+                    "Résumé comfort topics that should NOT substitute for JD depth unless tied to the question: "
+                    f"{off_s}.\n"
+                )
 
         blob = gemini_client.generate_json(
             SYSTEM_EVALUATE,
@@ -803,23 +854,16 @@ def assistant_next_question(
 
 
 def closing_message(profile: dict[str, Any]) -> str:
-    """Generate professional interview closing."""
-    blob = gemini_client.generate_json(
-        SYSTEM_CLOSE,
-        _profile_snippet(profile),
-        temperature=0.35,
-    )
-    msg = str(blob.get("message", "")).strip()
+    """Return a neutral, always-true interview closing.
 
-    # ── Guardrail: prevent empty closing ──
-    if not msg:
-        name = _get_candidate_name(profile)
-        msg = (
-            f"Thank you{', ' + name if name else ''} for your time today. "
-            f"You demonstrated strong project experience throughout our conversation. "
-            f"Your performance report will be available shortly. Best of luck!"
-        )
-    return msg
+    Important: avoid unconditional praise (can be inaccurate) and avoid an LLM call
+    (closing should be reliable even when the report generation is struggling).
+    """
+    name = _get_candidate_name(profile)
+    return (
+        f"Thank you{', ' + name if name else ''} for your time today. "
+        "We’re preparing your performance report now — it will be available shortly."
+    )
 
 
 def finalize_report(
@@ -1171,6 +1215,24 @@ def load_jd_optional(
     if jd and jd.user_id == user_id:
         return jd.raw_text
     return None
+
+
+def load_jd_bundle(
+    db_session,
+    jd_id: uuid.UUID | None,
+    user_id: uuid.UUID,
+) -> tuple[str | None, dict[str, Any]]:
+    """JD raw text + structured keywords (same shape as resume analyze route)."""
+    if not jd_id:
+        return None, {}
+    jd = db_session.get(JobDescription, jd_id)
+    if not jd or jd.user_id != user_id:
+        return None, {}
+    raw = jd.raw_text or ""
+    st = jd.extracted_keywords if isinstance(jd.extracted_keywords, dict) else {}
+    st = dict(st)
+    st.setdefault("keywords", st.get("keywords") or [])
+    return raw, st
 
 
 def session_transcript_turns(

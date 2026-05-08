@@ -34,6 +34,14 @@ type BulletFeedback = {
   suggestion?: string;
 };
 
+type DomainFit = {
+  mismatch?: boolean;
+  severity?: string;
+  resume_track?: string;
+  jd_track?: string;
+  absent_jd_skills?: string[];
+};
+
 type Feedback = {
   summary?: string;
   sections?: Array<{
@@ -57,12 +65,17 @@ type Feedback = {
     skills_to_learn_next?: string[];
     strategic_tip?: string;
   };
+  /** Structured domain/résumé-vs-JD track signal (persisted with analysis). */
+  domain_fit?: DomainFit | null;
+  domain_alignment?: Record<string, unknown> | null;
 };
 
 type AnalyzeResult = {
   match_percent: number;
   dimensions: Record<string, number>;
   formula?: string;
+  domain_mismatch?: boolean;
+  jd_match_percent_capped_at?: number;
   feedback?: Feedback;
 };
 
@@ -82,6 +95,7 @@ export default function ResumePage() {
   const router = useRouter();
   const dropRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const didInitFromStorageRef = useRef(false);
 
   const [jds, setJds] = useState<JD[]>([]);
   const [profiles, setProfiles] = useState<Profile[]>([]);
@@ -90,12 +104,21 @@ export default function ResumePage() {
   const [analyzeResult, setAnalyzeResult] = useState<AnalyzeResult | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [analyzeProgress, setAnalyzeProgress] = useState(0);
+  const [loadingProgress, setLoadingProgress] = useState(0);
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshProgress, setRefreshProgress] = useState(0);
   const [dragging, setDragging] = useState(false);
   const [jdText, setJdText] = useState("");
   const [jdTitle, setJdTitle] = useState("");
   const [showJdForm, setShowJdForm] = useState(false);
-  const [view, setView] = useState<"setup" | "results">("setup");
+  const [view, setView] = useState<"loading" | "setup" | "results">("loading");
   const [activeProfileId, setActiveProfileId] = useState<string | null>(null);
+  // When the user explicitly chooses "New Analysis", keep them on setup even if
+  // profiles load async (prevents snap-back to last results mid-upload).
+  const userForcedSetupRef = useRef(false);
+
+  const VIEW_KEY = "resume_page_view";
+  const ACTIVE_KEY = "resume_active_profile_id";
 
   const activeProfile = profiles.find((p) => p.profile_id === activeProfileId) ?? profiles[0] ?? null;
 
@@ -109,22 +132,94 @@ export default function ResumePage() {
     return p;
   }, []);
 
+  // Restore last UI state immediately to avoid "setup flash" on navigation.
+  useEffect(() => {
+    if (didInitFromStorageRef.current) return;
+    didInitFromStorageRef.current = true;
+    if (typeof window === "undefined") return;
+    const v = (localStorage.getItem(VIEW_KEY) || "").trim();
+    const pid = (localStorage.getItem(ACTIVE_KEY) || "").trim();
+    if (pid) setActiveProfileId(pid);
+    if (v === "setup" || v === "results") {
+      setView(v);
+      userForcedSetupRef.current = v === "setup";
+    }
+  }, []);
+
   useEffect(() => {
     if (authLoading || !user) return;
     void (async () => {
+      setRefreshing(view !== "loading");
       try {
         const p = await reload();
+        if (view === "loading") setLoadingProgress(100);
         if (p.length > 0) {
-          setActiveProfileId(p[0].profile_id);
-          setView("results");
+          const preferred =
+            activeProfileId && p.some((x) => x.profile_id === activeProfileId)
+              ? activeProfileId
+              : p[0].profile_id;
+          setActiveProfileId(preferred);
+          if (!userForcedSetupRef.current) setTimeout(() => setView("results"), 120);
+        } else {
+          setTimeout(() => setView("setup"), 120);
         }
       } catch { /* ignore */ }
+      finally {
+        setRefreshing(false);
+        setRefreshProgress(0);
+      }
     })();
-  }, [authLoading, user, reload]);
+  }, [authLoading, user, reload, activeProfileId, view]);
+
+  // Loading progress bar (cosmetic): ramp to ~90% while fetching.
+  useEffect(() => {
+    if (view !== "loading") {
+      setLoadingProgress(0);
+      return;
+    }
+    setLoadingProgress(5);
+    const start = Date.now();
+    const totalMs = 3500;
+    const timer = setInterval(() => {
+      const elapsed = Date.now() - start;
+      const pct = Math.min(90, Math.max(5, Math.round((elapsed / totalMs) * 90)));
+      setLoadingProgress(pct);
+      if (pct >= 90) clearInterval(timer);
+    }, 120);
+    return () => clearInterval(timer);
+  }, [view]);
+
+  // In-results refresh progress (cosmetic): shows when view restores to results but data is still loading.
+  useEffect(() => {
+    if (!refreshing) {
+      setRefreshProgress(0);
+      return;
+    }
+    setRefreshProgress(8);
+    const start = Date.now();
+    const totalMs = 2200;
+    const timer = setInterval(() => {
+      const elapsed = Date.now() - start;
+      const pct = Math.min(92, Math.max(8, Math.round((elapsed / totalMs) * 92)));
+      setRefreshProgress(pct);
+      if (pct >= 92) clearInterval(timer);
+    }, 120);
+    return () => clearInterval(timer);
+  }, [refreshing]);
 
   useEffect(() => {
     if (!authLoading && !user) router.replace("/login");
   }, [authLoading, user, router]);
+
+  // Persist view + active profile for navigation back/forward.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (view !== "loading") localStorage.setItem(VIEW_KEY, view);
+  }, [view]);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (activeProfileId) localStorage.setItem(ACTIVE_KEY, activeProfileId);
+  }, [activeProfileId]);
 
   // Restore last saved analysis when profile loads
   useEffect(() => {
@@ -134,6 +229,11 @@ export default function ResumePage() {
       match_percent: Number(m.match_percent) || 0,
       dimensions: (m.dimensions as Record<string, number>) || {},
       formula: typeof m.formula === "string" ? m.formula : undefined,
+      domain_mismatch: Boolean(m.domain_mismatch),
+      jd_match_percent_capped_at:
+        typeof m.jd_match_percent_capped_at === "number"
+          ? m.jd_match_percent_capped_at
+          : undefined,
       feedback: (activeProfile.feedback as Feedback | undefined) ?? undefined,
     });
   }, [activeProfile?.profile_id, activeProfile?.match_result, activeProfile?.feedback, analyzeResult]);
@@ -219,6 +319,7 @@ export default function ResumePage() {
     if (!selectedJd) { toast("error", "Select or paste a job description first"); return; }
     setBusy("Parsing resume…");
     try {
+      userForcedSetupRef.current = false;
       const profile = await apiPost<Profile>("/api/v1/resume-profiles/from-upload", {
         upload_id: upload.upload_id,
         jd_id: selectedJd,
@@ -253,6 +354,8 @@ export default function ResumePage() {
   const missingKw = kwBlock?.missing ?? [];
   const atsData = fb?.ats;
   const smart = fb?.smart_insights;
+  const domainMismatch =
+    Boolean(fb?.domain_fit?.mismatch) || Boolean(analyzeResult?.domain_mismatch);
   const activeJd = jds.find((j) => j.id === (activeProfile?.jd_id ?? selectedJd));
   const jdHeadline =
     activeJd?.title?.trim() ||
@@ -265,6 +368,23 @@ export default function ResumePage() {
   //  SETUP SCREEN
   // ═══════════════════════════════════════════════════════════════════════════
 
+  if (view === "loading") {
+    return (
+      <div className="card" style={{ textAlign: "center", padding: "48px 24px" }}>
+        <div style={{ fontSize: 36, marginBottom: 12 }}>⏳</div>
+        <div style={{ fontSize: 15, fontWeight: 600, color: "var(--text-primary)", marginBottom: 6 }}>
+          Loading your last analysis…
+        </div>
+        <div style={{ fontSize: 13, color: "var(--text-secondary)" }}>
+          Fetching your saved resume profiles and job descriptions.
+        </div>
+        <div style={{ maxWidth: 520, margin: "18px auto 0" }}>
+          <ProgressBar pct={loadingProgress} label="Loading…" />
+        </div>
+      </div>
+    );
+  }
+
   if (view === "setup") {
     return (
       <div>
@@ -275,7 +395,7 @@ export default function ResumePage() {
             <div className="page-subtitle">Upload your resume + job description — get a full AI-powered analysis in one click</div>
           </div>
           {profiles.length > 0 && (
-            <button className="btn-secondary" onClick={() => setView("results")}>
+            <button className="btn-secondary" onClick={() => { userForcedSetupRef.current = false; setView("results"); }}>
               View Last Analysis →
             </button>
           )}
@@ -425,7 +545,7 @@ export default function ResumePage() {
           </div>
         </div>
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-          <button className="btn-secondary" onClick={() => { setView("setup"); setAnalyzeResult(null); }}>
+          <button className="btn-secondary" onClick={() => { userForcedSetupRef.current = true; setView("setup"); setAnalyzeResult(null); }}>
             ← New Analysis
           </button>
           <button className="btn-secondary" onClick={onReAnalyze} disabled={!!busy}>
@@ -433,6 +553,11 @@ export default function ResumePage() {
           </button>
         </div>
       </div>
+
+      {/* Refreshing bar when returning to results */}
+      {refreshing && analyzeProgress === 0 && (
+        <ProgressBar pct={refreshProgress} label="Refreshing your saved analysis…" />
+      )}
 
       {/* Progress bar during re-run */}
       {analyzeProgress > 0 && <ProgressBar pct={analyzeProgress} label={busy ?? "Processing…"} />}
@@ -494,7 +619,33 @@ export default function ResumePage() {
           {fb?.summary && (
             <div className="card" style={{ marginBottom: 20 }}>
               <div className="card-header"><div className="card-title">💬 Coach Summary</div></div>
-              <p style={{ fontSize: 13, color: "var(--text-secondary)", lineHeight: 1.7, margin: 0 }}>{fb.summary}</p>
+              {domainMismatch ? (
+                (() => {
+                  const raw = (fb.summary ?? "").trim();
+                  const splitIdx = raw.indexOf("\n\n");
+                  const lead = splitIdx >= 0 ? raw.slice(0, splitIdx).trim() : raw;
+                  const rest = splitIdx >= 0 ? raw.slice(splitIdx + 2).trim() : "";
+                  return (
+                    <>
+                      <p style={{
+                        fontSize: 14,
+                        fontWeight: 600,
+                        color: "var(--text-primary)",
+                        lineHeight: 1.65,
+                        margin: "0 0 12px",
+                      }}
+                      >
+                        {lead}
+                      </p>
+                      {rest ? (
+                        <p style={{ fontSize: 13, color: "var(--text-secondary)", lineHeight: 1.7, margin: 0 }}>{rest}</p>
+                      ) : null}
+                    </>
+                  );
+                })()
+              ) : (
+                <p style={{ fontSize: 13, color: "var(--text-secondary)", lineHeight: 1.7, margin: 0 }}>{fb.summary}</p>
+              )}
             </div>
           )}
 

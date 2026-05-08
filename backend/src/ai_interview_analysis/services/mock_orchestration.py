@@ -22,10 +22,12 @@ from ai_interview_analysis.services.interview_input_guard import (
     refusal_assistant_message,
     screen_user_answer,
 )
+from ai_interview_analysis.services.resume_pipeline import analyze_domain_alignment
 from ai_interview_analysis.services.mock_interview import (
     _fallback_question,
     assistant_follow_same_topic,
     assistant_next_question,
+    classify_continue_intent,
     closing_message,
     enrich_report_with_post_interview_dimensions,
     ensure_evaluation_semantic_defaults,
@@ -34,6 +36,7 @@ from ai_interview_analysis.services.mock_interview import (
     finalize_report,
     first_assistant_message,
     format_recent_transcript_excerpt,
+    load_jd_bundle,
     load_jd_optional,
     outline_from_resume,
 )
@@ -289,6 +292,96 @@ def _canonical_or_last_q(sess: MockInterviewSession, turns: list[MockTurn]) -> s
     return _last_assistant_text(turns)
 
 
+def _count_substantive_user_answers(turns: list[MockTurn]) -> int:
+    """User turns that are not policy-screen blocks (those don't advance interview substance)."""
+    c = 0
+    for t in turns:
+        if t.role != "user":
+            continue
+        evl = t.evaluation if isinstance(t.evaluation, dict) else {}
+        if evl.get("policy_block"):
+            continue
+        c += 1
+    return c
+
+
+def _domain_gap_probe_message(domain_alignment: dict[str, Any], substantive_user_count: int) -> str:
+    """Extra main question when domain mismatch would otherwise close too early."""
+    skills_raw = domain_alignment.get("absent_skills_for_jd")
+    skills = [str(x).strip() for x in skills_raw if str(x).strip()] if isinstance(skills_raw, list) else []
+    jd_track = str(domain_alignment.get("jd_career_track") or "this role").strip()
+    if skills:
+        sk = skills[(max(0, substantive_user_count - 1)) % len(skills)]
+        return (
+            f"Before we wrap this section—{jd_track} requires credible depth on **{sk}**. "
+            "Walk through one concrete example end-to-end: what you owned, the setup, "
+            "how you measured success, and what you would improve next time?"
+        )
+    return (
+        f"Mapping to {jd_track}: what is the most technically deep work you have done that aligns with this role's "
+        "core craft, and what gap are you still closing?"
+    )
+
+
+def _prepend_domain_mismatch_warning(opening: str, domain_alignment: dict[str, Any]) -> str:
+    """Ensure the first assistant turn names a ladder mismatch (but still asks only one question)."""
+    if not isinstance(domain_alignment, dict) or not bool(domain_alignment.get("domain_mismatch")):
+        return (opening or "").strip()
+
+    msg = (opening or "").strip()
+    if not msg:
+        return msg
+
+    # If the model already referenced mismatch, don't double-prefix.
+    lower = msg.lower()
+    if "domain" in lower and ("mismatch" in lower or "different" in lower):
+        return msg
+
+    r = str(domain_alignment.get("resume_career_track") or "").strip()
+    j = str(domain_alignment.get("jd_career_track") or "").strip()
+    if r and j:
+        prefix = (
+            f"Quick note: your recent experience reads closest to {r}, while this job is centered on {j} "
+            "— so I'll focus questions on closing those JD gaps."
+        )
+    else:
+        prefix = (
+            "Quick note: your résumé and this job appear to target different career tracks — "
+            "so I'll focus questions on closing the JD gaps."
+        )
+
+    # Keep SYSTEM_OPEN_Q's constraint of exactly one question mark in the whole bubble.
+    prefix = prefix.replace("?", "")
+    return f"{prefix}\n\n{msg}".strip()
+
+
+def _mismatch_confirm_message(domain_alignment: dict[str, Any]) -> str:
+    """Standalone gating message shown BEFORE the first interview question."""
+    da = domain_alignment if isinstance(domain_alignment, dict) else {}
+    r = str(da.get("resume_career_track") or "").strip()
+    j = str(da.get("jd_career_track") or "").strip()
+    if r and j:
+        return (
+            f"Quick note: your recent experience reads closest to {r}, while this job is centered on {j}.\n\n"
+            "You can still practise this interview, but I will focus questions on the JD gaps.\n\n"
+            "Would you like to continue? (yes/no)"
+        )
+    return (
+        "Quick note: your résumé and this job appear to target different career tracks.\n\n"
+        "You can still practise this interview, but I will focus questions on the JD gaps.\n\n"
+        "Would you like to continue? (yes/no)"
+    )
+
+
+def _interpret_yes_no(text: str) -> str | None:
+    """Return 'yes' / 'no' / None for ambiguous."""
+    # Semantic classifier only (LLM). If unclear/unavailable, treat as ambiguous and ask again.
+    decision = classify_continue_intent(text)
+    if decision in ("yes", "no"):
+        return decision
+    return None
+
+
 def start_session(
     db: Session,
     *,
@@ -304,21 +397,29 @@ def start_session(
     if not prof or prof.user_id != user_id:
         raise ValueError("invalid_resume_profile")
     t0 = time.perf_counter()
-    jd_raw = load_jd_optional(db, jd_id, user_id)
+    effective_jd_id = jd_id or prof.jd_id
+    jd_raw, jd_struct = load_jd_bundle(db, effective_jd_id, user_id)
     profile_data = dict(prof.profile_data or {})
     outline = outline_from_resume(profile_data, jd_raw, interview_type, level)
     topics = outline.get("topics") or [{"id": "t0", "title": role or "General", "anchor": "experience"}]
 
-    msg = first_assistant_message(
-        outline={"topics": topics},
+    da = analyze_domain_alignment(profile_data, jd_raw or "", jd_struct)
+    min_before_close = 8 if da.get("domain_mismatch") else 0
+
+    first_q = first_assistant_message(
+        outline=outline,
         profile=profile_data,
         interview_type=interview_type,
         level=level,
+        domain_alignment=da,
     )
+    # If mismatch: gate with an explicit yes/no confirmation BEFORE asking questions.
+    awaiting_confirm = bool(da.get("domain_mismatch"))
+    msg = _mismatch_confirm_message(da) if awaiting_confirm else first_q
 
     sess = MockInterviewSession(
         user_id=user_id,
-        jd_id=jd_id,
+        jd_id=effective_jd_id,
         resume_profile_id=resume_profile_id,
         role=role or "General",
         level=level,
@@ -330,9 +431,15 @@ def start_session(
         max_followups_per_topic=max_followups,
         session_state={
             "outline": outline,
-            "canonical_question": msg,
+            # Canonical interview question (used for eval routing / refusals). On mismatch-gate,
+            # keep this as the real first question, not the confirmation prompt.
+            "canonical_question": first_q,
             # Used for filtering "accidental / no-answer" sessions out of history UI.
             "has_user_answers": False,
+            "domain_alignment": da,
+            "min_user_answers_before_close": min_before_close,
+            "awaiting_mismatch_confirm": awaiting_confirm,
+            "pending_first_question": first_q if awaiting_confirm else None,
         },
     )
     stamp_session_activity(sess)
@@ -374,6 +481,120 @@ def submit_answer(
         raise RuntimeError("session_not_accepting_answers")
 
     st = dict(sess.session_state or {})
+    # Special gate: if mismatch confirmation is pending, interpret answer as yes/no first.
+    if bool(st.get("awaiting_mismatch_confirm")):
+        decision = _interpret_yes_no(answer_text or "")
+        turns = _turns(db, sess.id)
+        next_idx = _next_idx(turns)
+
+        # Record the user message for transcript completeness.
+        db.add(
+            MockTurn(
+                session_id=sess.id,
+                turn_index=next_idx,
+                role="user",
+                content=answer_text,
+                modality=(modality or "text"),
+                evaluation=None,
+            ),
+        )
+        db.flush()
+
+        if decision == "no":
+            # End immediately without running interview scoring.
+            bye = "No problem — I won’t start the interview. Update your JD/resume pairing and start again when ready."
+            db.add(
+                MockTurn(
+                    session_id=sess.id,
+                    turn_index=next_idx + 1,
+                    role="assistant",
+                    content=bye,
+                    modality=None,
+                ),
+            )
+            st2 = dict(st)
+            st2["ended_without_answers"] = True
+            st2["awaiting_mismatch_confirm"] = False
+            st2["pending_first_question"] = None
+            sess.session_state = st2
+            flag_modified(sess, "session_state")
+            sess.phase = InterviewPhase.ended.value
+            sess.ended_at = utcnow()
+            db.commit()
+            return _return_submit(
+                db,
+                sess,
+                t_submit,
+                {
+                    "done": True,
+                    "phase": InterviewPhase.ended.value,
+                    "final_report": None,
+                    "assistant_message": bye,
+                    "evaluation": None,
+                },
+            )
+
+        if decision == "yes":
+            q = str(st.get("pending_first_question") or "").strip()
+            if not q:
+                # Fallback: use canonical_question if pending missing.
+                q = str(st.get("canonical_question") or "").strip()
+            if not q:
+                q = "Great — to start, walk me through your most relevant experience for this job and what you would prioritize learning first?"
+            db.add(
+                MockTurn(
+                    session_id=sess.id,
+                    turn_index=next_idx + 1,
+                    role="assistant",
+                    content=q,
+                    modality=None,
+                ),
+            )
+            st3 = dict(st)
+            st3["awaiting_mismatch_confirm"] = False
+            st3["pending_first_question"] = None
+            # Do not mark has_user_answers True yet: this was a confirmation, not a graded answer.
+            sess.session_state = st3
+            flag_modified(sess, "session_state")
+            stamp_session_activity(sess)
+            db.commit()
+            return _return_submit(
+                db,
+                sess,
+                t_submit,
+                {
+                    "done": False,
+                    "evaluation": None,
+                    "assistant_message": q,
+                    "phase": sess.phase,
+                },
+            )
+
+        # Ambiguous: ask again, do not advance topics.
+        retry = "Reply 'yes' to continue with the mock interview, or 'no' to stop here."
+        db.add(
+            MockTurn(
+                session_id=sess.id,
+                turn_index=next_idx + 1,
+                role="assistant",
+                content=retry,
+                modality=None,
+            ),
+        )
+        stamp_session_activity(sess)
+        db.commit()
+        return _return_submit(
+            db,
+            sess,
+            t_submit,
+            {
+                "done": False,
+                "evaluation": None,
+                "assistant_message": retry,
+                "phase": sess.phase,
+            },
+        )
+
     st["has_user_answers"] = True
     sess.session_state = st
     flag_modified(sess, "session_state")
@@ -382,6 +603,7 @@ def submit_answer(
     prof = db.get(ResumeProfile, sess.resume_profile_id) if sess.resume_profile_id else None
     profile_data = dict(prof.profile_data or {}) if prof else {}
     jd_raw = load_jd_optional(db, sess.jd_id, user_id)
+    da_sess = st.get("domain_alignment") if isinstance(st.get("domain_alignment"), dict) else None
 
     turns = _turns(db, sess.id)
     next_idx = _next_idx(turns)
@@ -425,6 +647,7 @@ def submit_answer(
             topic_phase=str(tp_phase) if tp_phase else None,
             recent_transcript=transcript_before_answer or None,
             jd_snippet=jd_clip[:6000] if jd_clip else None,
+            domain_alignment=da_sess,
         )
 
     ev["answered_topic_index"] = ti
@@ -636,6 +859,39 @@ def submit_answer(
             },
         )
 
+    # Domain mismatch: require minimum substantive user answers before closing.
+    fresh_turns = _turns(db, sess.id)
+    st_close = dict(sess.session_state or {})
+    min_need = int(st_close.get("min_user_answers_before_close") or 0)
+    da_close = st_close.get("domain_alignment") if isinstance(st_close.get("domain_alignment"), dict) else {}
+    user_ans_n = _count_substantive_user_answers(fresh_turns)
+
+    if min_need > 0 and bool(da_close.get("domain_mismatch")) and user_ans_n < min_need:
+        amsg = _domain_gap_probe_message(da_close, user_ans_n)
+        _update_canonical_question(sess, amsg)
+        ai_idx = next_idx + 1
+        db.add(
+            MockTurn(
+                session_id=sess.id,
+                turn_index=ai_idx,
+                role="assistant",
+                content=amsg,
+                modality=None,
+            ),
+        )
+        db.commit()
+        return _return_submit(
+            db,
+            sess,
+            t_submit,
+            {
+                "done": False,
+                "evaluation": ev,
+                "assistant_message": amsg,
+                "phase": sess.phase,
+            },
+        )
+
     # Closing message first; report generation runs in a follow-up call so this request stays fast/reliable.
     sess.phase = InterviewPhase.closing.value
     try:
@@ -821,6 +1077,106 @@ def end_session(
         )
     except Exception:
         logger.exception("end_session failed session_id=%s", sess.id)
+        db.rollback()
+        raise
+
+
+def request_end_session(
+    db: Session,
+    session_id: uuid.UUID,
+    user_id: uuid.UUID,
+) -> dict[str, Any] | None:
+    """Request an interview to end, without generating the report in this request.
+
+    This moves the session into the `closing` phase and marks report generation as pending.
+    The client should follow-up with the `/report` endpoint (or poll) to finalize.
+
+    Safe to call multiple times.
+    """
+    sess = db.get(MockInterviewSession, session_id)
+    if not sess or sess.user_id != user_id:
+        return None
+
+    turns = _turns(db, sess.id)
+
+    # Already ended — return what we have
+    if sess.ended_at:
+        return _with_section_scores(
+            db,
+            sess,
+            {
+                "done": True,
+                "phase": sess.phase,
+                "final_report": sess.final_report,
+                "assistant_message": _last_assistant_text(turns),
+            },
+        )
+
+    # Already closing — keep it fast and idempotent
+    if sess.phase == InterviewPhase.closing.value:
+        return _with_section_scores(
+            db,
+            sess,
+            {
+                "done": True,
+                "report_pending": True,
+                "phase": sess.phase,
+                "final_report": sess.final_report,
+                "assistant_message": _last_assistant_text(turns),
+            },
+        )
+
+    prof = db.get(ResumeProfile, sess.resume_profile_id) if sess.resume_profile_id else None
+    profile_data = dict(prof.profile_data or {}) if prof else {}
+
+    user_turn_records = [t for t in turns if t.role == "user"]
+    if user_turn_records:
+        try:
+            bye = closing_message(profile_data)
+        except Exception:
+            bye = "Thanks for your time today — we are generating your performance report now."
+    else:
+        bye = (
+            "We're closing this mock interview. "
+            "You didn't submit any answers yet, but you can restart anytime from setup."
+        )
+
+    next_idx = _next_idx(turns)
+    try:
+        db.add(
+            MockTurn(
+                session_id=sess.id,
+                turn_index=next_idx,
+                role="assistant",
+                content=bye,
+                modality=None,
+            ),
+        )
+        sess.phase = InterviewPhase.closing.value
+        st = dict(sess.session_state or {})
+        st["report_generation"] = "pending"
+        sess.session_state = st
+        flag_modified(sess, "session_state")
+        stamp_session_activity(sess)
+
+        # Report is not generated here; keep these empty until `/report` finalizes.
+        sess.final_report = None
+        sess.ended_at = None
+
+        db.commit()
+        return _with_section_scores(
+            db,
+            sess,
+            {
+                "done": True,
+                "report_pending": True,
+                "phase": sess.phase,
+                "final_report": None,
+                "assistant_message": bye,
+            },
+        )
+    except Exception:
+        logger.exception("request_end_session failed session_id=%s", sess.id)
         db.rollback()
         raise
 

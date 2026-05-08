@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation";
 
 import { useAuth } from "@/context/AuthContext";
 import { useToast } from "@/context/ToastContext";
-import { apiGetJson, apiPost } from "@/lib/api";
+import { apiGetJson, apiPost, apiPostDirect } from "@/lib/api";
 import { liveEvalAverages, type LiveEvalMetrics } from "@/lib/mockInterviewEval";
 import { formatResumeProfileOptionLabel, type ResumeProfileListItem } from "@/lib/resumeProfileLabel";
 
@@ -213,6 +213,7 @@ export default function MockInterviewPage() {
   const [session, setSession] = useState<SessionState | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [resumingSession, setResumingSession] = useState(false);
+  const [reportError, setReportError] = useState<string | null>(null);
 
   const [selProfile, setSelProfile] = useState("");
   const [selType, setSelType] = useState("technical");
@@ -495,11 +496,13 @@ export default function MockInterviewPage() {
         void (async () => {
           try {
             if (busyRef.current) return;
-            setBusy("Idle timeout — generating your performance report…");
+            setBusy("Idle timeout — ending interview…");
             await apiPost(`/api/v1/interviews/sessions/${sid}/end`, {});
             const updated = await fetchSession(sid);
             clearActiveSession();
-            if (updated.final_report) {
+            if (updated.phase === "closing") {
+              toast("info", "Session ended due to inactivity — generating your performance report…");
+            } else if (updated.final_report) {
               toast(
                 "info",
                 `No activity for ${Math.round(IDLE_MS / 60_000)} minutes — we ended the interview and saved your performance report.`,
@@ -538,22 +541,50 @@ export default function MockInterviewPage() {
     void (async () => {
       setBusy("Generating your performance report…");
       try {
-        await apiPost(`/api/v1/interviews/sessions/${s.id}/report`, {});
-        const u = await fetchSession(s.id);
-        if (u.phase === "ended" && u.final_report) {
+        setReportError(null);
+
+        // Retry a few times to handle transient 503/LLM/network issues.
+        // Avoid leaving the UI stuck in "closing" with no escape hatch.
+        const maxAttempts = 6;
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+          try {
+            await apiPost(`/api/v1/interviews/sessions/${s.id}/report`, {});
+          } catch (e) {
+            // If we can't generate right now, wait and retry.
+            if (attempt === maxAttempts) throw e;
+            const waitMs = Math.min(12_000, 1500 * attempt);
+            await new Promise((r) => setTimeout(r, waitMs));
+            continue;
+          }
+
+          const u = await fetchSession(s.id);
+          if (u.phase === "ended" && u.final_report) {
+            clearActiveSession();
+            toast("success", "Interview complete! Your report is ready.");
+            void loadSessionHistory();
+            return;
+          }
+
+          // If backend ended but report is still missing, keep retrying.
+          if (attempt < maxAttempts) {
+            await new Promise((r) => setTimeout(r, 1200));
+          }
+        }
+
+        // Final check (best-effort)
+        const u2 = await fetchSession(s.id);
+        if (u2.phase === "ended" && u2.final_report) {
           clearActiveSession();
           toast("success", "Interview complete! Your report is ready.");
           void loadSessionHistory();
-        } else if (u.phase === "ended" && !u.final_report) {
-          toast("info", "Session ended — reopen this interview from History if your report looks empty.");
-          void loadSessionHistory();
+        } else {
+          setReportError("Report generation is taking longer than expected. You can retry.");
         }
       } catch (e) {
         reportFinalizeStartedFor.current = null;
-        toast(
-          "error",
-          e instanceof Error ? e.message : "Could not generate your performance report. Try refreshing the page.",
-        );
+        const msg = e instanceof Error ? e.message : "Could not generate your performance report right now.";
+        setReportError(msg || "Could not generate your performance report right now.");
+        toast("error", msg || "Could not generate your performance report right now.");
       } finally {
         setBusy(null);
       }
@@ -585,8 +616,12 @@ export default function MockInterviewPage() {
   };
 
   async function createInterviewCore() {
-    const res = await apiPost<{ session_id: string; assistant_message: string }>("/api/v1/interviews/sessions", {
+    const selectedProfile = profiles.find((p) => p.profile_id === selProfile) ?? null;
+    // Session creation can trigger multiple LLM calls (outline + opening) and exceed the
+    // Next.js dev rewrite proxy socket timeout; call backend directly (same approach as /analyze).
+    const res = await apiPostDirect<{ session_id: string; assistant_message: string }>("/api/v1/interviews/sessions", {
       resume_profile_id: selProfile,
+      jd_id: selectedProfile?.jd_id ?? null,
       role,
       level: selLevel,
       interview_type: selType,
@@ -749,7 +784,8 @@ export default function MockInterviewPage() {
       // Use the dedicated /end endpoint which force-ends and generates the report
       const updated = await tryEndSession(session.id);
       clearActiveSession();
-      if (updated.phase === "ended" && updated.final_report) {
+      setReportError(null);
+      if (updated && updated.phase === "ended" && updated.final_report) {
         toast("success", "Report ready! Scroll down to view your results.");
       } else {
         toast("info", "Session ended.");
@@ -1248,6 +1284,27 @@ export default function MockInterviewPage() {
               <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 8 }}>
                 You will see scores and narrative feedback as soon as this step finishes — usually within a minute.
               </div>
+              {reportError ? (
+                <div style={{ marginTop: 10, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                  <div style={{ fontSize: 12, color: "var(--danger)" }}>
+                    {reportError}
+                  </div>
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    style={{ fontSize: 12, padding: "6px 10px" }}
+                    onClick={() => {
+                      // Allow the closing effect to re-run for this session.
+                      reportFinalizeStartedFor.current = null;
+                      setReportError(null);
+                      void fetchSession(session.id);
+                    }}
+                    disabled={!!busy}
+                  >
+                    Retry report
+                  </button>
+                </div>
+              ) : null}
             </div>
           )}
 

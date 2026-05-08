@@ -1,0 +1,2 @@
+Rewrite resume bullet WITHOUT inventing achievements or metrics user did not imply.
+Respond JSON only: {"revised_text": string, "rationale": string}

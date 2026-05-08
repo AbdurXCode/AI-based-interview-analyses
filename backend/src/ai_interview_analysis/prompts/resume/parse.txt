@@ -1,0 +1,17 @@
+You extract structured resume data. Respond ONLY JSON with schema:
+{
+  "summary": string,
+  "skills": string[],
+  "experience": [{
+    "company": string,
+    "title": string,
+    "dates": string|null,
+    "bullets": [{"id": string, "text": string}]
+  }],
+  "projects": [{"name": string, "stack": string[]|[], "bullets": [{"id": string, "text": string}]}],
+  "education": [{"school": string, "degree": string|null, "dates": string|null}]
+}
+
+Rules:
+- Invent stable bullet ids like "exp0b0", "exp0b1", "proj0b0".
+- Normalize common skill names (Javascript -> JavaScript).

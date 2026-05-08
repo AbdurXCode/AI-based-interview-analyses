@@ -1,0 +1,77 @@
+About the job
+About us:
+
+Foundever® is a global leader in the customer experience (CX) industry. With 150,000 associates across the globe, we’re the team behind the best experiences for +800 of the world’s leading and digital-first brands. Our innovative CX solutions, technology and expertise are designed to support operational needs for our clients and deliver a seamless experience to customers in the moments that matter.
+Supporting +9 million customer conversations every day in +60 languages across 45 countries, Foundever combines global strength and scale with the agile, entrepreneurial approach of our founder-led culture, enabling companies of all sizes and industries to transform their CX.
+
+
+• Winner of Comparably’s Award for Best Global Culture in 2024, 2023, 2022 and 2021
+• Gold Stevie Award Winner for Great Employers in 2024 and 2022
+• We foster an exciting culture of creativity, connection, and commitment
+
+
+Job Summary:
+
+We are seeking a skilled Junior Data Scientist with solid Python programming and analytical capabilities to support data-driven initiatives and infrastructure setup across projects. The ideal candidate will be responsible for configuring Azure environments, maintaining Python-based automation and analytics solutions, and delivering actionable insights through data analysis. This role requires collaboration with cross-functional teams and an understanding of operational environments, particularly within BPO or call center settings.
+The successful candidate will leverage Python libraries such as Pandas, NumPy, and Scikit-learn to process and analyze data, while ensuring Azure environments are configured according to best practices and security standards. In addition, the role involves identifying operational improvement opportunities and contributing to workflow enhancements within BPO environments.
+Candidates should have a strong foundation in data analysis, statistical methods, and cloud-based infrastructure, along with the ability to communicate complex findings to stakeholders in a clear and structured manner. Familiarity with Azure services, machine learning concepts, and emerging technologies such as Agentic AI will be considered an advantage.
+
+
+Primary Job Responsibilities:
+
+Azure Setup and Configuration:
+Set up and configure Azure environments for various projects
+Ensure compliance with Azure best practices and security standards
+Collaborate with cross-functional teams to implement and maintain Azure infrastructure.
+Programming Skills in Python:
+Maintain Python scripts for data processing, analysis, and automation tasks
+Utilize Python libraries such as Pandas, NumPy, and Scikit-learn for data manipulation and machine learning
+
+
+Analytical Skills:
+Conduct in-depth data analysis using appropriate statistical methods
+Interpret complex data sets and derive actionable insights.
+Present findings in a clear and concise manner to stakeholders.
+
+
+Operational Experience in BPO/Call Center Environment:
+Have experience working in a BPO or call center environment, either directly or as a support function
+Understand the operational challenges and requirements of such environments
+Contribute to improving processes and workflows within the BPO/Call Center
+
+
+What you need in order to be successful:
+
+
+
+Education and Experience:
+
+Bachelor's degree in Computer Science, Statistics, Mathematics, or a related field PREFERED.
+Minimum 2 years of experience in data science, data analysis, or a related field.
+We recognize that this is a role where candidates will need support and development opportunities. It will serve candidates who have recently started their data science journey.
+
+
+Technical Skills:
+
+Experience with Python, data manipulation and machine learning
+Strong analytical skills with a proven track record of delivering high-quality results
+Understanding of statistical methods and some knowledge of machine learning algorithms
+Experience working in a BPO or call center environment, either directly or as a support function
+Familiarity with Azure services and best practices for setting up and configuring environments PREFERED
+Excellent communication skills to effectively collaborate with cross-functional teams and stakeholders
+Ability to identify and resolve complex technical issues efficiently
+Fluent English (B2 Level) is essential, plus either French, German or Spanish is a plus
+Conversant with Agentic AI concepts – a conceptual understanding of agentic AI and AI agents is essential, practical experience in any capacity on any platform a distinct advantage
+
+
+What We Offer:
+
+• Competitive compensation package.
+• Excellent learning and development opportunities
+• Growth opportunities within an expanding team.
+• Fully remote working available (APAC/LATAM)
+
+
+
+
+At Foundever®, your talent matters most. Our inclusive recruitment process ensures that opportunities are the same for everyone, lighting a path to success that's fair and square. Among our 150,000-strong global community, we celebrate uniqueness and stand against discrimination, fostering a work culture rich in respect, innovation, and equal chances. So if you know you can do the job, trust your potential and apply.
