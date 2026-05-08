@@ -1,3 +1,4 @@
+*.egg-info/
 __pycache__/
 *.py[cod]
 *.pyo
@@ -8,6 +9,7 @@ Gaze_Environment/
 
 .env
 .env.*
+!.env.example
 
 assets/*.mp4
 assets/*.wav
@@ -19,3 +21,30 @@ tmp/
 *.zip
 temp_video.mp4
 
+frontend/.next/
+frontend/node_modules/
+frontend/tsconfig.tsbuildinfo
+
+backend/.venv/
+backend/uploads/
+backend/**/*.log
+
+# Local / generated uploads (relative paths vary by cwd)
+uploads/
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Tests / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ── Heavy ML binaries (prefer Git LFS or a documented download script) ─────────
+backend/models/pretrained_models/*.h5
+backend/models/pretrained_models/*.dat
+backend/models/pretrained_models/*.pkl
+
+# Personal scratch (don’t ship in the repo); remove the line below if you add real sample assets
+/*.pdf
