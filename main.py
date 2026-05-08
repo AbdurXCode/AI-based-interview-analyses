@@ -1,19 +1,18 @@
 """
-Legacy entrypoint kept for compatibility.
+API entrypoint from monorepo root.
 
-Run with:
-  uvicorn main:app --reload
+    uvicorn main:app --reload --port 8080
 
-The real FastAPI app lives in `src/ai_interview_analysis/api/app.py`.
+For legacy video analysis paths (`./models`, `./assets`), run uvicorn from `backend/`
+so working directory matches those relative paths.
 """
 
 import sys
 from pathlib import Path
 
-# Allow running without installing the package
 _ROOT = Path(__file__).resolve().parent
-_SRC = _ROOT / "src"
+_SRC = _ROOT / "backend" / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from ai_interview_analysis.api.app import app
+from ai_interview_analysis.api.app import app  # noqa: E402

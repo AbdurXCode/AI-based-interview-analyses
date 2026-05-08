@@ -1,0 +1,5 @@
+# Heavy optional stack for legacy /Interview-Assessment (video analysis).
+# Install alongside requirements-api.txt when FEATURE_VIDEO_ANALYSIS=1.
+# See original requirements.txt for full pins; this is a delegated superset anchor.
+
+-r requirements-legacy-ml.txt

@@ -1,0 +1,46 @@
+# Slim API image: FastAPI + DB + GCP (no TensorFlow / video ML).
+# Use: pip install -r requirements-api.txt
+
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+python-multipart>=0.0.9
+pydantic>=2.9.0
+pydantic-settings>=2.6.0
+email-validator>=2.2.0
+python-dotenv>=1.0.1
+httpx>=0.27.0
+
+# Database
+sqlalchemy>=2.0.36
+alembic>=1.14.0
+psycopg[binary]>=3.2.0
+
+# Auth
+passlib[bcrypt]>=1.7.4
+bcrypt>=4.2.0
+python-jose[cryptography]>=3.3.0
+
+# Google (LLM + optional Speech/TTS + optional GCS)
+google-generativeai>=0.8.3
+# Vertex AI Agent Development Kit (AdkApp) — used when GCP_PROJECT_ID + VERTEX_AI_LOCATION are set
+google-adk>=1.32.0
+google-cloud-aiplatform>=1.144.0
+google-genai>=1.0.0
+google-cloud-speech>=2.28.0
+google-cloud-texttospeech>=2.21.0
+google-cloud-storage>=2.18.0
+
+# Resume parsing
+pdfplumber>=0.11.4
+python-docx>=1.1.2
+
+# Ops
+slowapi>=0.1.9
+tenacity>=9.0.0
+
+# Optional legacy suggestion route (`use_openai_legacy_answer_suggestions`)
+openai>=1.40.0
+
+# Tests
+pytest>=8.3.0
+pytest-asyncio>=0.24.0
