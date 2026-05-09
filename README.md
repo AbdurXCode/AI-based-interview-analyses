@@ -1,4 +1,4 @@
-﻿# AI Interview Preparation Platform
+# AI Interview Preparation Platform
 
 An end-to-end platform to **practice mock interviews** and get **AI-generated feedback** tailored to your **resume** and a target **job description**—plus a **resume analyzer** that scores match quality and suggests concrete improvements.
 
