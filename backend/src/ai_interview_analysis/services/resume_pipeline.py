@@ -199,9 +199,118 @@ def parse_resume_structure(extracted_text: str) -> dict[str, Any]:
     return gemini_client.generate_json(SYSTEM_PARSE, f"Resume text:\n\n{payload}")
 
 
+def _empty_jd_invalid(reason: str) -> dict[str, Any]:
+    return {
+        "valid_jd": False,
+        "rejection_reason": (reason or "Unable to validate this text as a job posting.")[:600],
+        "must_have_skills": [],
+        "nice_to_have_skills": [],
+        "keywords": [],
+        "title_guess": None,
+    }
+
+
+def normalize_jd_extract_result(blob: dict[str, Any]) -> dict[str, Any]:
+    """Normalize Gemini JD JSON; ensure valid_jd + stable keys for downstream use."""
+    if not isinstance(blob, dict):
+        return _empty_jd_invalid("Could not parse job-description extraction.")
+
+    vjd_raw = blob.get("valid_jd")
+    if isinstance(vjd_raw, str):
+        slug = vjd_raw.strip().lower()
+        if slug in ("false", "no", "0"):
+            blob = {**blob, "valid_jd": False}
+        elif slug in ("true", "yes", "1"):
+            blob = {**blob, "valid_jd": True}
+
+    def _lst(key: str) -> list[str]:
+        raw = blob.get(key)
+        if not isinstance(raw, list):
+            return []
+        out: list[str] = []
+        for x in raw:
+            if isinstance(x, str) and x.strip():
+                out.append(str(x).strip()[:240])
+            if len(out) >= 80:
+                break
+        return out
+
+    if blob.get("valid_jd") is False:
+        return {
+            "valid_jd": False,
+            "rejection_reason": str(blob.get("rejection_reason") or "This text does not look like a valid job posting.")[
+                :600
+            ],
+            "must_have_skills": [],
+            "nice_to_have_skills": [],
+            "keywords": [],
+            "title_guess": None,
+        }
+
+    title = blob.get("title_guess")
+    title_out = str(title).strip()[:280] if title is not None and str(title).strip() else None
+
+    out: dict[str, Any] = {
+        "valid_jd": True,
+        "rejection_reason": "",
+        "must_have_skills": _lst("must_have_skills"),
+        "nice_to_have_skills": _lst("nice_to_have_skills"),
+        "keywords": _lst("keywords"),
+        "title_guess": title_out,
+    }
+    return out
+
+
 def extract_jd_profile(raw_jd: str) -> dict[str, Any]:
     jd = raw_jd.strip()[:48000]
-    return gemini_client.generate_json(SYSTEM_JD, f"Job Description:\n\n{jd}")
+    try:
+        blob = gemini_client.generate_json(SYSTEM_JD, f"Job Description:\n\n{jd}")
+        if not isinstance(blob, dict):
+            return _empty_jd_invalid("Job description extraction returned an unexpected response.")
+    except Exception:
+        return _empty_jd_invalid("Job description extraction is temporarily unavailable.")
+    had_valid_jd_key = "valid_jd" in blob
+    normalized = normalize_jd_extract_result(blob)
+    if not had_valid_jd_key and normalized.get("valid_jd") is not False:
+        normalized["valid_jd"] = True
+        normalized["rejection_reason"] = ""
+    return normalized
+
+
+def ensure_valid_jd_struct(db: Any, jd_row: Any) -> dict[str, Any]:
+    """Load or refresh extracted_keywords; raise ValueError if JD is rejected."""
+    from sqlalchemy.orm.attributes import flag_modified
+
+    raw = (getattr(jd_row, "raw_text", None) or "").strip()
+    if len(raw) < 20:
+        raise ValueError("Job description text is too short. Paste a complete job posting.")
+
+    jd_struct = getattr(jd_row, "extracted_keywords", None)
+    jd_struct = dict(jd_struct) if isinstance(jd_struct, dict) else {}
+
+    needs_refresh = (
+        jd_struct.get("valid_jd") is None
+        or "valid_jd" not in jd_struct
+        or jd_struct == {}
+    )
+    if needs_refresh:
+        jd_struct = extract_jd_profile(raw)
+        if jd_struct.get("valid_jd") is False:
+            raise ValueError(
+                str(jd_struct.get("rejection_reason") or "This does not appear to be a valid job posting."),
+            )
+        jd_row.extracted_keywords = jd_struct
+        flag_modified(jd_row, "extracted_keywords")
+        db.commit()
+        db.refresh(jd_row)
+
+    if jd_struct.get("valid_jd") is False:
+        raise ValueError(
+            str(jd_struct.get("rejection_reason") or "This does not appear to be a valid job posting."),
+        )
+
+    jd_struct.setdefault("keywords", jd_struct.get("keywords") or [])
+    return jd_struct
 
 
 def compute_match(

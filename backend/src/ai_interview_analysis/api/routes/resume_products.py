@@ -55,13 +55,17 @@ def create_job_description(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> JobDescriptionOut:
-    jd = JobDescription(user_id=user.id, raw_text=body.raw_text, role_hint=body.role_hint, title=body.title)
-    try:
-        struct = resume_pipeline.extract_jd_profile(body.raw_text)
-    except Exception:
-        # Keyword extraction is optional — save JD even if Gemini is unavailable
+    struct = resume_pipeline.extract_jd_profile(body.raw_text)
+    if not isinstance(struct, dict):
         struct = {}
-    jd.extracted_keywords = struct if isinstance(struct, dict) else {}
+    if not struct.get("valid_jd"):
+        msg = str(struct.get("rejection_reason") or "This does not look like a valid job posting.")
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail={"error": "invalid_jd", "message": msg},
+        )
+    jd = JobDescription(user_id=user.id, raw_text=body.raw_text, role_hint=body.role_hint, title=body.title)
+    jd.extracted_keywords = struct
     db.add(jd)
     db.commit()
     db.refresh(jd)
@@ -233,10 +237,14 @@ async def analyze_match(
             status.HTTP_400_BAD_REQUEST,
             "Attach a JD: create a job description, then PATCH resume-profiles/{id} with jd_id.",
         )
-    jd_struct = jd_row.extracted_keywords if isinstance(jd_row.extracted_keywords, dict) else {}
-    jd_struct = dict(jd_struct)
     jd_raw = jd_row.raw_text
-    jd_struct.setdefault("keywords", jd_struct.get("keywords") or [])
+    try:
+        jd_struct = resume_pipeline.ensure_valid_jd_struct(db, jd_row)
+    except ValueError as exc:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail={"error": "invalid_jd", "message": str(exc) or "Invalid job description."},
+        ) from exc
 
     profile = dict(rp.profile_data or {})
     resume_plain: str | None = None
@@ -317,9 +325,13 @@ def rewrite_bullet(
     if not da or "domain_mismatch" not in da:
         jd_row = db.get(JobDescription, rp.jd_id) if rp.jd_id else None
         if jd_row and jd_row.user_id == user.id:
-            jd_struct = jd_row.extracted_keywords if isinstance(jd_row.extracted_keywords, dict) else {}
-            jd_struct = dict(jd_struct)
-            jd_struct.setdefault("keywords", jd_struct.get("keywords") or [])
+            try:
+                jd_struct = resume_pipeline.ensure_valid_jd_struct(db, jd_row)
+            except ValueError as exc:
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    detail={"error": "invalid_jd", "message": str(exc) or "Invalid job description."},
+                ) from exc
             da = resume_pipeline.analyze_domain_alignment(pdata, jd_row.raw_text or "", jd_struct)
     if da.get("domain_mismatch"):
         raise HTTPException(
