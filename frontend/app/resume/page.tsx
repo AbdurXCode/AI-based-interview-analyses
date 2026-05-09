@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation";
 
 import { useAuth } from "@/context/AuthContext";
 import { useToast } from "@/context/ToastContext";
-import { apiGetJson, apiPatch, apiPost, apiPostDirect, apiUploadFile } from "@/lib/api";
+import { ApiError, apiGetJson, apiPatch, apiPost, apiPostDirect, apiUploadFile } from "@/lib/api";
 
 // ─── types ────────────────────────────────────────────────────────────────────
 
@@ -87,6 +87,22 @@ const DIM_LABELS: Record<string, string> = {
   skills_alignment: "Skills Alignment",
 };
 
+function apiErrorHint(e: unknown): string {
+  if (e instanceof ApiError && e.payload !== null && typeof e.payload === "object") {
+    const detail = (e.payload as { detail?: unknown }).detail;
+    if (detail !== null && typeof detail === "object") {
+      const d = detail as { error?: unknown; message?: unknown };
+      if (
+        d.error === "invalid_jd" &&
+        typeof d.message === "string" &&
+        d.message.trim()
+      )
+        return d.message.trim();
+    }
+  }
+  return e instanceof Error ? e.message : "Something went wrong.";
+}
+
 // ─── component ────────────────────────────────────────────────────────────────
 
 export default function ResumePage() {
@@ -121,6 +137,10 @@ export default function ResumePage() {
   const ACTIVE_KEY = "resume_active_profile_id";
 
   const activeProfile = profiles.find((p) => p.profile_id === activeProfileId) ?? profiles[0] ?? null;
+
+  const jdWordCount = jdText.trim().length ? jdText.trim().split(/\s+/).filter(Boolean).length : 0;
+  const jdLooksCvLike =
+    /\b(my experience|i have|i've led|references available)\b/i.test(jdText);
 
   const reload = useCallback(async () => {
     const [j, p] = await Promise.all([
@@ -275,7 +295,7 @@ export default function ResumePage() {
       setJdText(""); setJdTitle(""); setShowJdForm(false);
       toast("success", "Job description saved.");
     } catch (e) {
-      toast("error", e instanceof Error ? e.message : "Failed to save JD");
+      toast("error", apiErrorHint(e) || "Failed to save JD");
     } finally { setBusy(null); }
   }
 
@@ -307,7 +327,7 @@ export default function ResumePage() {
       await reload();
       toast("success", `Analysis complete — ${res.match_percent.toFixed(0)}% JD match`);
     } catch (e) {
-      toast("error", e instanceof Error ? e.message : "Analysis failed");
+      toast("error", apiErrorHint(e) || "Analysis failed");
     } finally {
       setBusy(null);
       setTimeout(() => setAnalyzeProgress(0), 1000);
@@ -331,7 +351,7 @@ export default function ResumePage() {
       setView("results");
       await runAnalysis(pid, selectedJd);
     } catch (e) {
-      toast("error", e instanceof Error ? e.message : "Failed");
+      toast("error", apiErrorHint(e) || "Failed");
     } finally { setBusy(null); }
   }
 
@@ -498,6 +518,19 @@ export default function ResumePage() {
                     required
                     placeholder="Paste the full job description here…"
                   />
+                  {jdWordCount > 0 && (
+                    <div className="form-hint" style={{ fontSize: 13, opacity: 0.85, marginTop: 4 }}>
+                      {jdWordCount} word{jdWordCount === 1 ? "" : "s"}
+                      {jdWordCount < 50
+                        ? " — very short postings may be rejected if they do not name a role and responsibilities."
+                        : ""}
+                    </div>
+                  )}
+                  {jdLooksCvLike && (
+                    <div className="form-hint" style={{ fontSize: 13, color: "var(--warning, #b45309)", marginTop: 4 }}>
+                      This reads like a résumé or cover letter. Paste the employer&apos;s job posting instead.
+                    </div>
+                  )}
                 </div>
                 <button type="submit" className="btn-primary" disabled={!!busy}>
                   {busy === "Saving job description…"

@@ -204,6 +204,54 @@ function loadActiveSession(): { id: string; role: string; level: string; type: s
   } catch { return null; }
 }
 
+/** POST /report until the session is ended with a stored final_report (retries for LLM/network). */
+async function requestMockInterviewReportWithRetries(sessionId: string): Promise<SessionState> {
+  const maxAttempts = 6;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      await apiPost(`/api/v1/interviews/sessions/${sessionId}/report`, {});
+    } catch {
+      if (attempt === maxAttempts) {
+        throw new Error("Could not generate your performance report right now.");
+      }
+      await new Promise((r) => setTimeout(r, Math.min(12_000, 1500 * attempt)));
+      continue;
+    }
+    const u = await apiGetJson<SessionState>(`/api/v1/interviews/sessions/${sessionId}`);
+    if (u.phase === "ended" && u.final_report) return u;
+    if (attempt < maxAttempts) await new Promise((r) => setTimeout(r, 1200));
+  }
+  const u2 = await apiGetJson<SessionState>(`/api/v1/interviews/sessions/${sessionId}`);
+  if (u2.phase === "ended" && u2.final_report) return u2;
+  throw new Error("Report generation is taking longer than expected. You can retry.");
+}
+
+async function closeMockInterviewFully(sessionId: string): Promise<SessionState> {
+  await apiPost(`/api/v1/interviews/sessions/${sessionId}/end`, {});
+  return requestMockInterviewReportWithRetries(sessionId);
+}
+
+function InterviewFullscreenWait({ label, sub }: { label: string; sub?: string }) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: 12,
+        minHeight: "min(560px, 72vh)",
+        color: "var(--text-muted)",
+        fontSize: 14,
+      }}
+    >
+      <span className="spinner" />
+      <span>{label}</span>
+      {sub ? <span style={{ fontSize: 13, opacity: 0.85, textAlign: "center", maxWidth: 420 }}>{sub}</span> : null}
+    </div>
+  );
+}
+
 export default function MockInterviewPage() {
   const { user, loading: authLoading } = useAuth();
   const { toast } = useToast();
@@ -227,6 +275,8 @@ export default function MockInterviewPage() {
   const chatEndRef = useRef<HTMLDivElement>(null);
   /** Ensures `/report` finalization runs once per session (handles React Strict Mode / remount). */
   const reportFinalizeStartedFor = useRef<string | null>(null);
+  /** True after user confirms End until `/end` finishes — avoids Send racing the close. */
+  const terminatingInterviewRef = useRef(false);
 
   const [sessionHistory, setSessionHistory] = useState<SessionSummary[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -287,6 +337,10 @@ export default function MockInterviewPage() {
   useEffect(() => {
     if (!authLoading && !user) router.replace("/login");
   }, [authLoading, user, router]);
+
+  useEffect(() => {
+    if (session?.phase === "ended") terminatingInterviewRef.current = false;
+  }, [session?.phase]);
 
   // Load resume profiles + session list
   useEffect(() => {
@@ -494,11 +548,12 @@ export default function MockInterviewPage() {
       if (serverIdleMs >= IDLE_MS) {
         idleFiredSessionRef.current = sid;
         void (async () => {
+          let updated: SessionState | null = null;
           try {
             if (busyRef.current) return;
             setBusy("Idle timeout — ending interview…");
             await apiPost(`/api/v1/interviews/sessions/${sid}/end`, {});
-            const updated = await fetchSession(sid);
+            updated = await fetchSession(sid);
             clearActiveSession();
             if (updated.phase === "closing") {
               toast("info", "Session ended due to inactivity — generating your performance report…");
@@ -517,7 +572,12 @@ export default function MockInterviewPage() {
           } catch (e) {
             idleFiredSessionRef.current = null;
             toast("error", e instanceof Error ? e.message : "Could not end session after idle timeout.");
-          } finally {
+            setBusy(null);
+            return;
+          }
+          if (updated?.phase === "closing" && !updated.final_report) {
+            setBusy("Generating your performance report…");
+          } else {
             setBusy(null);
           }
         })();
@@ -542,44 +602,19 @@ export default function MockInterviewPage() {
       setBusy("Generating your performance report…");
       try {
         setReportError(null);
-
-        // Retry a few times to handle transient 503/LLM/network issues.
-        // Avoid leaving the UI stuck in "closing" with no escape hatch.
-        const maxAttempts = 6;
-        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-          try {
-            await apiPost(`/api/v1/interviews/sessions/${s.id}/report`, {});
-          } catch (e) {
-            // If we can't generate right now, wait and retry.
-            if (attempt === maxAttempts) throw e;
-            const waitMs = Math.min(12_000, 1500 * attempt);
-            await new Promise((r) => setTimeout(r, waitMs));
-            continue;
-          }
-
-          const u = await fetchSession(s.id);
-          if (u.phase === "ended" && u.final_report) {
-            clearActiveSession();
-            toast("success", "Interview complete! Your report is ready.");
-            void loadSessionHistory();
-            return;
-          }
-
-          // If backend ended but report is still missing, keep retrying.
-          if (attempt < maxAttempts) {
-            await new Promise((r) => setTimeout(r, 1200));
-          }
-        }
-
-        // Final check (best-effort)
-        const u2 = await fetchSession(s.id);
-        if (u2.phase === "ended" && u2.final_report) {
+        const u = await requestMockInterviewReportWithRetries(s.id);
+        if (u.role) setRole(u.role);
+        if (u.level) setSelLevel(u.level);
+        if (u.interview_type) setSelType(u.interview_type);
+        setSession(u);
+        if (u.phase === "ended" && u.final_report) {
           clearActiveSession();
           toast("success", "Interview complete! Your report is ready.");
           void loadSessionHistory();
-        } else {
-          setReportError("Report generation is taking longer than expected. You can retry.");
+          return;
         }
+        reportFinalizeStartedFor.current = null;
+        setReportError("Report generation is taking longer than expected. You can retry.");
       } catch (e) {
         reportFinalizeStartedFor.current = null;
         const msg = e instanceof Error ? e.message : "Could not generate your performance report right now.";
@@ -641,11 +676,9 @@ export default function MockInterviewPage() {
       await apiPost(`/api/v1/interviews/sessions/${sessionId}/end`, {});
       return await fetchSession(sessionId);
     } catch (e) {
-      // If the backend actually ended the session but the request failed (proxy/socket),
-      // a follow-up GET will confirm and let the UI recover.
       try {
         const s = await fetchSession(sessionId);
-        if (s.phase === "ended") return s;
+        if (s.phase === "ended" || s.phase === "closing") return s;
       } catch {
         /* ignore */
       }
@@ -694,7 +727,7 @@ export default function MockInterviewPage() {
       setBusy("Saving previous session…");
       try {
         try {
-          await tryEndSession(ghostId);
+          await closeMockInterviewFully(ghostId);
         } catch (e) {
           const msg = e instanceof Error ? e.message : "";
           if (/404|410|not found|gone/i.test(msg)) {
@@ -722,6 +755,10 @@ export default function MockInterviewPage() {
 
   async function onSend() {
     if (!session || !answer.trim()) return;
+    if (terminatingInterviewRef.current) {
+      toast("info", "Ending the interview — please wait a moment.");
+      return;
+    }
     if (session.phase === "ended") {
       toast("info", "This interview has already ended.");
       return;
@@ -779,21 +816,28 @@ export default function MockInterviewPage() {
     ) {
       return;
     }
+    terminatingInterviewRef.current = true;
     setBusy("Generating your performance report…");
     try {
-      // Use the dedicated /end endpoint which force-ends and generates the report
       const updated = await tryEndSession(session.id);
       clearActiveSession();
       setReportError(null);
-      if (updated && updated.phase === "ended" && updated.final_report) {
-        toast("success", "Report ready! Scroll down to view your results.");
+      if (updated?.phase === "closing" && !updated.final_report) {
+        setBusy("Generating your performance report…");
+        toast("info", "Thanks — we're preparing your performance report.");
       } else {
-        toast("info", "Session ended.");
+        terminatingInterviewRef.current = false;
+        setBusy(null);
+      }
+      if (updated?.phase === "ended" && updated.final_report) {
+        toast("success", "Report ready! Scroll down to view your results.");
       }
       void loadSessionHistory();
     } catch (e) {
+      terminatingInterviewRef.current = false;
       toast("error", e instanceof Error ? e.message : "Failed to end session");
-    } finally { setBusy(null); }
+      setBusy(null);
+    }
   }
 
   async function onNewSession() {
@@ -805,9 +849,10 @@ export default function MockInterviewPage() {
       ) {
         return;
       }
+      const sid = session.id;
       setBusy("Generating your performance report…");
       try {
-        await tryEndSession(session.id);
+        await closeMockInterviewFully(sid);
         void loadSessionHistory();
       } catch (e) {
         toast("error", e instanceof Error ? e.message : "Could not end session");
@@ -1232,10 +1277,47 @@ export default function MockInterviewPage() {
     );
   }
 
-  /* ── LIVE SESSION ───────────────────────────────────────────── */
-  const sessionClosing = session.phase === "closing";
-  const reportBusy = sessionClosing && Boolean(busy);
+  /* ── CLOSING: full-screen wait (matches “Resuming your session…” — no chat underlay) ── */
+  if (session.phase === "closing" && !session.final_report) {
+    return (
+      <div style={{ paddingBottom: 40 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 24, flexWrap: "wrap", gap: 12 }}>
+          <div>
+            <div className="page-title">Mock Interview</div>
+            <div className="page-subtitle">AI-powered · personalised to your resume and target role</div>
+          </div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <span className="tag tag-amber">● Generating report</span>
+            <span className="tag tag-purple">{displayType} · {displayLevel}</span>
+          </div>
+        </div>
+        <InterviewFullscreenWait
+          label="Generating your performance report…"
+          sub="You'll see scores and narrative feedback here as soon as this finishes — usually within a minute."
+        />
+        {reportError ? (
+          <div style={{ display: "flex", justifyContent: "center", marginTop: 20, gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+            <span style={{ fontSize: 13, color: "var(--danger)" }}>{reportError}</span>
+            <button
+              type="button"
+              className="btn-secondary"
+              style={{ fontSize: 12, padding: "6px 10px" }}
+              onClick={() => {
+                reportFinalizeStartedFor.current = null;
+                setReportError(null);
+                void fetchSession(session.id);
+              }}
+              disabled={!!busy}
+            >
+              Retry report
+            </button>
+          </div>
+        ) : null}
+      </div>
+    );
+  }
 
+  /* ── LIVE SESSION ───────────────────────────────────────────── */
   return (
     <div style={{ paddingBottom: 40 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 24, flexWrap: "wrap", gap: 12 }}>
@@ -1244,9 +1326,7 @@ export default function MockInterviewPage() {
           <div className="page-subtitle">AI-powered · personalised to your resume and target role</div>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <span className={`tag ${sessionClosing ? "tag-amber" : "tag-teal"}`}>
-            {sessionClosing ? "● Wrap-up · report" : "● Live"}
-          </span>
+          <span className="tag tag-teal">● Live</span>
           <span className="tag tag-purple">{displayType} · {displayLevel}</span>
         </div>
       </div>
@@ -1258,55 +1338,10 @@ export default function MockInterviewPage() {
             <div className="ai-avatar">🤖</div>
             <div>
               <div className="ai-name">Alex — AI Interviewer</div>
-              <div className="ai-status">
-                {sessionClosing ? (reportBusy ? "● Building your performance report…" : "● Interview complete · preparing report…") : "● Live session"}
-              </div>
+              <div className="ai-status">● Live session</div>
             </div>
             <div className="interview-timer">{formatTime(elapsed)}</div>
           </div>
-
-          {sessionClosing && (
-            <div
-              style={{
-                marginBottom: 12,
-                padding: "12px 14px",
-                borderRadius: 12,
-                background: "var(--bg-surface)",
-                border: "1px solid var(--border)",
-              }}
-            >
-              <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 8 }}>
-                {reportBusy ? "Generating performance report…" : "Interview wrap-up"}
-              </div>
-              <div className="interview-progress-track">
-                <div className="interview-progress-bar" aria-hidden />
-              </div>
-              <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 8 }}>
-                You will see scores and narrative feedback as soon as this step finishes — usually within a minute.
-              </div>
-              {reportError ? (
-                <div style={{ marginTop: 10, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-                  <div style={{ fontSize: 12, color: "var(--danger)" }}>
-                    {reportError}
-                  </div>
-                  <button
-                    type="button"
-                    className="btn-secondary"
-                    style={{ fontSize: 12, padding: "6px 10px" }}
-                    onClick={() => {
-                      // Allow the closing effect to re-run for this session.
-                      reportFinalizeStartedFor.current = null;
-                      setReportError(null);
-                      void fetchSession(session.id);
-                    }}
-                    disabled={!!busy}
-                  >
-                    Retry report
-                  </button>
-                </div>
-              ) : null}
-            </div>
-          )}
 
           <div className="chat-messages">
             {session.turns.map((turn, i) => (
@@ -1317,19 +1352,11 @@ export default function MockInterviewPage() {
                 <div className="msg-bubble">{turn.content}</div>
               </div>
             ))}
-            {busy && !sessionClosing && (
+            {busy && (
               <div className="msg ai">
                 <div className="msg-avatar ai">🤖</div>
                 <div className="msg-bubble" style={{ display: "flex", alignItems: "center", gap: 8 }}>
                   <span className="spinner" style={{ width: 12, height: 12 }} /> Thinking…
-                </div>
-              </div>
-            )}
-            {busy && sessionClosing && (
-              <div className="msg ai">
-                <div className="msg-avatar ai">🤖</div>
-                <div className="msg-bubble" style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <span className="spinner" style={{ width: 12, height: 12 }} /> Compiling your report…
                 </div>
               </div>
             )}
@@ -1349,13 +1376,13 @@ export default function MockInterviewPage() {
                   void onSend();
                 }
               }}
-              disabled={!!busy || sessionClosing}
+              disabled={!!busy}
             />
             <button
               className="btn-primary"
               style={{ padding: "10px 16px", alignSelf: "flex-end" }}
               onClick={onSend}
-              disabled={!!busy || sessionClosing || !answer.trim()}
+              disabled={!!busy || !answer.trim()}
             >
               Send ↗
             </button>
@@ -1373,15 +1400,15 @@ export default function MockInterviewPage() {
                   className="btn-danger"
                   style={{ width: "100%", justifyContent: "center", fontSize: 12 }}
                   onClick={() => void onEnd()}
-                  disabled={!!busy || sessionClosing}
+                  disabled={!!busy}
                 >
-                  {busy && busy.includes("report") ? <><span className="spinner" style={{ width: 11, height: 11 }} /> Generating report…</> : "⏹ End & Get Report"}
+                  {busy && busy.includes("performance report") ? <><span className="spinner" style={{ width: 11, height: 11 }} /> Ending…</> : "⏹ End & Get Report"}
                 </button>
                 <button
                   className="btn-secondary"
                   style={{ width: "100%", justifyContent: "center", fontSize: 12 }}
                   onClick={() => void endInterviewAndConfigureNew()}
-                  disabled={!!busy || sessionClosing}
+                  disabled={!!busy}
                 >
                   ↩ Cancel & restart (no report)
                 </button>
@@ -1441,7 +1468,7 @@ export default function MockInterviewPage() {
             <div className="panel-title">{session.topics && session.topics.length > 0 ? "Interview roadmap" : "Question progress"}</div>
             {session.topics && session.topics.length > 0 ? (
               <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-                {currentOutlineTopic && session.phase !== "ended" ? (
+                {currentOutlineTopic && session.phase !== "ended" && session.phase !== "closing" ? (
                   <div
                     style={{
                       padding: "10px 12px",
