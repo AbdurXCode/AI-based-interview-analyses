@@ -24,6 +24,7 @@ Replace placeholders such as `YOUR_DOMAIN`, `YOUR_REPO_URL`, `YOUR_EC2_PUBLIC_IP
 14. [11. Smoke tests](#11-smoke-tests)
 15. [12. Updating the app](#12-updating-the-app)
 16. [13. Troubleshooting](#13-troubleshooting)
+17. [14. Automated deploy from GitHub Actions](#14-automated-deploy-from-github-actions)
 
 ---
 
@@ -882,6 +883,39 @@ sudo tail -n 200 /var/log/nginx/error.log
 ```
 
 Mock interview fallback text such as **"Evaluation service busy"** often indicates transient **LLM quota/timeout/errors** rather than nginx routing — check backend logs around the request time after fixing upstream timeouts.
+
+---
+
+## 14. Automated deploy from GitHub Actions
+
+Push to **`main`** (or trigger **Deploy to EC2** manually under **Actions → Run workflow**) to run `.github/workflows/deploy-ec2.yml`. It SSHes into EC2, syncs **`/var/www/AI_Interview_Analysis`** to **`origin`** on the triggering branch (**`main`** for normal pushes), runs **`scripts/deploy-on-ec2.sh`** (Alembic, frontend build, `systemctl` + Nginx reload), then exits.
+
+### One-time prerequisites
+
+| Step | Detail |
+|------|--------|
+| **Server layout** | App at **`/var/www/AI_Interview_Analysis`**, systemd units **`interview-backend`** and **`interview-frontend`** as in [§12](#12-updating-the-app). |
+| **Git on EC2** | `git fetch` / pull must work **without** prompts (e.g. [deploy key](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/managing-deploy-keys) in the server repo’s **`~/.ssh`**). |
+| **`sudo` on deploy user** | SSH user (**`ubuntu`**) must run **`systemctl`**, **`nginx -t`**, **`nginx` reload** without a password (typical Ubuntu AMI). |
+| **SSH ingress** | GitHub-hosted runners use **dynamic IPs**. Tight SG + key-only SSH often needs a **self-hosted runner** inside AWS/VPC or **AWS SSM**; opening **22** broadly is weaker. |
+
+### GitHub repository secrets
+
+**Settings → Secrets and variables → Actions**:
+
+| Secret | Example |
+|--------|---------|
+| **`EC2_HOST`** | Elastic IP hostname or DNS for the instance |
+| **`EC2_USER`** | `ubuntu` |
+| **`EC2_SSH_KEY`** | **Private** key (PEM). Use a **CI-only** deploy key — never commit `.pem`. |
+
+### Manual rollout on EC2 (same commands as CI)
+
+From repo root after `git pull`:
+
+```bash
+bash scripts/deploy-on-ec2.sh
+```
 
 ---
 
