@@ -11,6 +11,9 @@ Gaze_Environment/
 .env.*
 !.env.example
 
+# SSH keys / certs (never commit EC2 `.pem`, etc.)
+*.pem
+
 assets/*.mp4
 assets/*.wav
 assets/coords_pred.csv
