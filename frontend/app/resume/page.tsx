@@ -112,6 +112,8 @@ export default function ResumePage() {
   const dropRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const didInitFromStorageRef = useRef(false);
+  /** Stop cosmetic progress ticks so a late timer cannot overwrite 100%. */
+  const analyzeProgressCanceledRef = useRef(false);
 
   const [jds, setJds] = useState<JD[]>([]);
   const [profiles, setProfiles] = useState<Profile[]>([]);
@@ -302,16 +304,20 @@ export default function ResumePage() {
   // ── analysis ─────────────────────────────────────────────────────────────────
 
   function startProgressTick() {
-    setAnalyzeProgress(0);
+    analyzeProgressCanceledRef.current = false;
+    setAnalyzeProgress(4);
     const start = Date.now();
     const totalMs = 90000;
+    /** While waiting, approach but never reach 100% (completion sets 100). */
+    const capWhileWaiting = 95;
     const tick = () => {
+      if (analyzeProgressCanceledRef.current) return;
       const elapsed = Date.now() - start;
-      const pct = Math.min(90, Math.round((elapsed / totalMs) * 90));
-      setAnalyzeProgress(pct);
-      if (pct < 90) setTimeout(tick, 1000);
+      const pct = Math.min(capWhileWaiting, Math.round((elapsed / totalMs) * capWhileWaiting));
+      setAnalyzeProgress(Math.max(pct, 4));
+      if (pct < capWhileWaiting && !analyzeProgressCanceledRef.current) setTimeout(tick, 500);
     };
-    setTimeout(tick, 1000);
+    setTimeout(tick, 400);
   }
 
   async function runAnalysis(profileId: string, jdId: string) {
@@ -322,15 +328,17 @@ export default function ResumePage() {
       // Bypass Next.js dev proxy (which times out at ~60s) by hitting the backend directly.
       // Backend CORS is configured for localhost:3000 / 127.0.0.1:3000.
       const res = await apiPostDirect<AnalyzeResult>(`/api/v1/resume-profiles/${profileId}/analyze`, {});
+      analyzeProgressCanceledRef.current = true;
       setAnalyzeProgress(100);
       setAnalyzeResult(res);
       await reload();
       toast("success", `Analysis complete — ${res.match_percent.toFixed(0)}% JD match`);
     } catch (e) {
+      analyzeProgressCanceledRef.current = true;
       toast("error", apiErrorHint(e) || "Analysis failed");
     } finally {
       setBusy(null);
-      setTimeout(() => setAnalyzeProgress(0), 1000);
+      setTimeout(() => setAnalyzeProgress(0), 2200);
     }
   }
 

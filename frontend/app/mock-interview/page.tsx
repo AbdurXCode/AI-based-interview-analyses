@@ -269,6 +269,8 @@ export default function MockInterviewPage() {
   const [role, setRole] = useState("Software Engineer");
 
   const [answer, setAnswer] = useState("");
+  /** Shown immediately after Send so user text appears before the AI “thinking” row. */
+  const [pendingUserBubble, setPendingUserBubble] = useState<string | null>(null);
   const [elapsed, setElapsed] = useState(0);
   const startRef = useRef<number | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -317,6 +319,7 @@ export default function MockInterviewPage() {
 
   async function openHistoryEntry(entry: SessionSummary) {
     setOpeningHistoryId(entry.id);
+    setPendingUserBubble(null);
     try {
       await fetchSession(entry.id);
       setOpenedFromHistory(true);
@@ -642,7 +645,7 @@ export default function MockInterviewPage() {
   // Auto-scroll to latest message
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [session?.turns]);
+  }, [session?.turns, pendingUserBubble, busy]);
 
   const formatTime = (secs: number) => {
     const m = String(Math.floor(secs / 60)).padStart(2, "0");
@@ -708,6 +711,7 @@ export default function MockInterviewPage() {
     startRef.current = null;
     setElapsed(0);
     setAnswer("");
+    setPendingUserBubble(null);
     void loadSessionHistory();
   }
 
@@ -767,9 +771,10 @@ export default function MockInterviewPage() {
       toast("info", "Your interview wrap-up was sent — we are generating your report.");
       return;
     }
-    setBusy("AI is evaluating your answer…");
     const text = answer.trim();
     setAnswer("");
+    setPendingUserBubble(text);
+    setBusy("AI is evaluating your answer…");
     try {
       await apiPost(`/api/v1/interviews/sessions/${session.id}/answers`, { text, modality: "text" });
       const updated = await fetchSession(session.id);
@@ -802,7 +807,10 @@ export default function MockInterviewPage() {
         toast("error", raw);
         setAnswer(text);
       }
-    } finally { setBusy(null); }
+    } finally {
+      setPendingUserBubble(null);
+      setBusy(null);
+    }
   }
 
   async function onEnd() {
@@ -867,6 +875,7 @@ export default function MockInterviewPage() {
     startRef.current = null;
     setElapsed(0);
     setAnswer("");
+    setPendingUserBubble(null);
     void loadSessionHistory();
   }
 
@@ -1352,6 +1361,12 @@ export default function MockInterviewPage() {
                 <div className="msg-bubble">{turn.content}</div>
               </div>
             ))}
+            {pendingUserBubble ? (
+              <div className="msg user">
+                <div className="msg-avatar user-av">{user?.email?.[0]?.toUpperCase() ?? "U"}</div>
+                <div className="msg-bubble">{pendingUserBubble}</div>
+              </div>
+            ) : null}
             {busy && (
               <div className="msg ai">
                 <div className="msg-avatar ai">🤖</div>
