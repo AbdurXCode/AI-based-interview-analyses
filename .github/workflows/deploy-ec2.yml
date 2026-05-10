@@ -1,0 +1,53 @@
+# Automated deploy to a single Ubuntu EC2 instance (SSH).
+#
+# Prerequisites (once):
+# 1. EC2 repo at /var/www/AI_Interview_Analysis — same layout as DEPLOYMENT.md (systemd: interview-backend, interview-frontend).
+# 2. Git on EC2 can `git fetch` origin without prompts (deploy key or HTTPS credential helper).
+# 3. SSH user (e.g. ubuntu) can run: sudo systemctl restart …, sudo nginx -t, sudo systemctl reload nginx (passwordless sudo on Ubuntu AMIs is typical).
+#
+# GitHub repo → Settings → Secrets and variables → Actions:
+#   EC2_HOST       public DNS or Elastic IP (e.g. ec2-xx.compute.amazonaws.com or your DuckDNS name if it resolves correctly)
+#   EC2_USER       e.g. ubuntu
+#   EC2_SSH_KEY    private half of an SSH key (NOT your admin .pem unless you knowingly reuse it — prefer a CI-only deploy key)
+#
+# SSH: SG must allow port 22 from GitHub-hosted runners OR use self-hosted runner / SSM instead (runners use dynamic egress IPs).
+
+name: Deploy to EC2
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+# Queue deploys — do not abort mid-flight (would leave npm/pip halfway).
+concurrency:
+  group: deploy-ec2-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (metadata only — server pulls from Git)
+        uses: actions/checkout@v4
+
+      - name: SSH deploy
+        uses: appleboy/ssh-action@v1.2.7
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          command_timeout: 25m
+          script: |
+            set -e
+            DEPLOY_ROOT="/var/www/AI_Interview_Analysis"
+            cd "$DEPLOY_ROOT"
+
+            BRANCH="${{ github.ref_name }}"
+            git remote -v
+            git fetch origin "$BRANCH"
+            git checkout "$BRANCH"
+            git reset --hard "origin/$BRANCH"
+
+            bash scripts/deploy-on-ec2.sh
