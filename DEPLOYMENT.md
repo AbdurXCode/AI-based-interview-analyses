@@ -897,17 +897,55 @@ Push to **`main`** (or trigger **Deploy to EC2** manually under **Actions → Ru
 | **Server layout** | App at **`/var/www/AI_Interview_Analysis`**, systemd units **`interview-backend`** and **`interview-frontend`** as in [§12](#12-updating-the-app). |
 | **Git on EC2** | `git fetch` / pull must work **without** prompts (e.g. [deploy key](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/managing-deploy-keys) in the server repo’s **`~/.ssh`**). |
 | **`sudo` on deploy user** | SSH user (**`ubuntu`**) must run **`systemctl`**, **`nginx -t`**, **`nginx` reload** without a password (typical Ubuntu AMI). |
-| **SSH ingress** | GitHub-hosted runners use **dynamic IPs**. Tight SG + key-only SSH often needs a **self-hosted runner** inside AWS/VPC or **AWS SSM**; opening **22** broadly is weaker. |
+| **SSH ingress** | See **Security group** below — GitHub-hosted runners need to reach **port 22**. |
+
+### CI SSH key (GitHub Actions → EC2)
+
+Use a **separate** key pair only for automation — **do not** reuse your admin `.pem` unless you accept shared exposure.
+
+1. **On your PC** generate a key without passphrase (PowerShell often mishandles `-N ""`; easiest is interactive):
+
+   ```powershell
+   ssh-keygen -t ed25519 -C "github-actions-ec2" -f "$env:USERPROFILE\.ssh\gha_ec2_deploy"
+   ```
+
+   Press **Enter** twice when asked for a passphrase (empty).
+
+2. **Public key on EC2:** SSH in with your normal **`.pem`**, then append **one line** from **`gha_ec2_deploy.pub`** to **`/home/ubuntu/.ssh/authorized_keys`** (after SSH is already working — see [§3 SSH from Windows PowerShell](#3-ssh-from-windows-powershell)).
+
+3. **Test from Windows** before enabling Actions:
+
+   ```powershell
+   ssh -i "$env:USERPROFILE\.ssh\gha_ec2_deploy" ubuntu@YOUR_EC2_PUBLIC_IP
+   ```
+
+   If login works, Actions can use the **private** key in **`EC2_SSH_KEY`**.
+
+### EC2 security group (SSH from GitHub)
+
+GitHub’s runners use **changing outbound IPs**, so an inbound rule **SSH (TCP 22)** from **only** your home **`x.x.x.x/32`** allows **you** but **blocks** the workflow (**timeout**).
+
+**Typical setup:** add an inbound rule **SSH**, port **22**, source **`0.0.0.0/0`** (IPv4 anywhere). **Security is key-based**: disable password SSH on the instance; keep **`ubuntu`** login via authorized keys only. You may **also** keep a **`/32`** rule for your IP if you like — it does not replace the **`0.0.0.0/0`** rule for Actions.
+
+**Tighter alternatives later:** AWS **Systems Manager Session Manager** (no open port 22 from internet), or a **self-hosted runner** inside your VPC so the SG can allow SSH only from that runner.
 
 ### GitHub repository secrets
 
-**Settings → Secrets and variables → Actions**:
+**Settings → Secrets and variables → Actions** → **Repository secrets** (not Environment secrets unless you configured an Environment):
 
 | Secret | Example |
 |--------|---------|
-| **`EC2_HOST`** | Elastic IP hostname or DNS for the instance |
+| **`EC2_HOST`** | Public IPv4, Elastic IP hostname, or DNS that resolves to the instance |
 | **`EC2_USER`** | `ubuntu` |
-| **`EC2_SSH_KEY`** | **Private** key (PEM). Use a **CI-only** deploy key — never commit `.pem`. |
+| **`EC2_SSH_KEY`** | Full **private** key text (`gha_ec2_deploy`), including **`BEGIN`** / **`END`** lines — never commit it |
+
+### Workflow action version
+
+The workflow uses **`appleboy/ssh-action`** pinned to a **release tag** (e.g. **`v1.0.3`**). If **Actions** fails at **“Set up job”** with **unable to resolve action**, pick a valid tag from [ssh-action releases](https://github.com/appleboy/ssh-action/releases) and update `.github/workflows/deploy-ec2.yml`.
+
+### Day-to-day
+
+After secrets and SG are correct: **`git push`** to **`main`** → **Actions** tab → wait for **green**. Red means live may not have updated — open the failed step log (often **`git`**, **`sudo`**, **`npm`**, or Alembic).
 
 ### Manual rollout on EC2 (same commands as CI)
 
